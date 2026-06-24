@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Particle Sphere</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#06060f;overflow:hidden;font-family:serif;color:#fff}
+#c3d{position:fixed;top:0;left:0;width:100%;height:100%;z-index:1}
+#vid{position:fixed;top:0;left:0;width:100%;height:100%;object-fit:cover;z-index:0;display:none;opacity:0.15;transform:scaleX(-1)}
+#ovr{position:fixed;top:0;left:0;width:100%;height:100%;z-index:2;pointer-events:none;display:none}
+#title{position:fixed;top:24px;left:28px;z-index:10;pointer-events:none}
+#title h1{font-size:20px;font-weight:400;letter-spacing:.05em;color:rgba(255,255,255,.88)}
+#title p{font-size:11px;color:rgba(255,255,255,.28);margin-top:3px;font-family:sans-serif;letter-spacing:.07em}
+#hint{position:fixed;top:24px;right:28px;z-index:10;font-family:sans-serif;font-size:10.5px;color:rgba(255,255,255,.22);text-align:right;line-height:2;letter-spacing:.04em}
+#controls{position:fixed;bottom:24px;right:24px;z-index:10}
+#btnCam{background:rgba(255,255,255,.06);border:.5px solid rgba(255,255,255,.18);color:rgba(255,255,255,.75);padding:7px 14px;font-size:11px;font-family:sans-serif;letter-spacing:.06em;cursor:pointer;border-radius:3px;transition:background .2s}
+#btnCam:hover{background:rgba(255,255,255,.12)}
+#btnCam.on{border-color:rgba(120,200,255,.5);color:rgba(120,200,255,.9)}
+#status{position:fixed;bottom:24px;left:28px;z-index:10;font-family:sans-serif;font-size:10.5px;color:rgba(255,255,255,.28);letter-spacing:.05em}
+#ring{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:5;pointer-events:none;display:none}
+/* hand dot that follows the tracked palm */
+#handDot{position:fixed;width:18px;height:18px;border:2px solid rgba(255,255,255,.55);border-radius:50%;pointer-events:none;z-index:8;display:none;transform:translate(-50%,-50%);transition:border-color .15s}
+#handDot.pinch{background:rgba(255,255,255,.75);border-color:rgba(255,200,100,.9);width:10px;height:10px}
+</style>
+</head>
+<body>
+<video id="vid" autoplay playsinline muted></video>
+<canvas id="ovr"></canvas>
+<canvas id="c3d"></canvas>
+<canvas id="ring" width="180" height="180"></canvas>
+<div id="handDot"></div>
+
+<div id="title"><h1>Particle Sphere</h1><p>gesture interface</p></div>
+<div id="hint">
+  one hand &mdash; move &amp; rotate<br>
+  pinch &amp; hold &mdash; charge &rarr; explode<br>
+  two hands &mdash; spread to scale<br>
+  finger count &mdash; color
+</div>
+<div id="controls"><button id="btnCam">enable webcam</button></div>
+<div id="status">enable webcam to begin</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+<script>
+const VIDEO  = document.getElementById('vid');
+const OVR    = document.getElementById('ovr');
+const RING   = document.getElementById('ring');
+const STA    = document.getElementById('status');
+const BTN    = document.getElementById('btnCam');
+const DOT    = document.getElementById('handDot');
+const octx   = OVR.getContext('2d');
+const rctx   = RING.getContext('2d');
+function setSta(t){STA.textContent=t}
+
+// ── renderer ──────────────────────────────────────────────────
+const renderer = new THREE.WebGLRenderer({
+  canvas: document.getElementById('c3d'),
+  antialias: true, alpha: true, powerPreference:'high-performance'
+});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.setSize(innerWidth,innerHeight);
+const scene = new THREE.Scene();
+const cam3  = new THREE.PerspectiveCamera(60,innerWidth/innerHeight,0.1,1000);
+cam3.position.z = 4;
+
+// ── particles ─────────────────────────────────────────────────
+const N = 3000;
+const geo  = new THREE.BufferGeometry();
+const pos  = new Float32Array(N*3);
+const col  = new Float32Array(N*3);
+const vel  = new Float32Array(N*3);
+const orig = new Float32Array(N*3);
+
+function fibPt(i,n,r){
+  const phi = Math.acos(1-2*(i+.5)/n);
+  const th  = Math.PI*(1+Math.sqrt(5))*i;
+  return [r*Math.sin(phi)*Math.cos(th), r*Math.sin(phi)*Math.sin(th), r*Math.cos(phi)];
+}
+for(let i=0;i<N;i++){
+  const [x,y,z]=fibPt(i,N,1.2);
+  orig[i*3]=x; orig[i*3+1]=y; orig[i*3+2]=z;
+  pos[i*3]=x;  pos[i*3+1]=y;  pos[i*3+2]=z;
+}
+
+const PALS=[
+  [.38,.68,1.0],
+  [.45,1.0,.6],
+  [1.0,.45,.28],
+  [.82,.3,.92],
+  [1.0,.82,.2],
+];
+let palI=0, tCol=[...PALS[0]], cCol=[...PALS[0]];
+for(let i=0;i<N;i++){
+  const t=i/N;
+  col[i*3]=cCol[0]*(.5+.5*t); col[i*3+1]=cCol[1]*(.5+.5*t); col[i*3+2]=cCol[2]*(.5+.5*t);
+}
+geo.setAttribute('position', new THREE.BufferAttribute(pos,3));
+geo.setAttribute('color',    new THREE.BufferAttribute(col,3));
+const mat = new THREE.PointsMaterial({size:.016,vertexColors:true,transparent:true,opacity:.9,sizeAttenuation:true});
+scene.add(new THREE.Points(geo,mat));
+
+// ── gesture state ─────────────────────────────────────────────
+// Raw targets — set directly from MediaPipe every frame it fires
+let rawX=0, rawY=0;           // palm world coords
+let rawRX=0, rawRY=0;         // rotation angles from wrist direction
+// Smoothed values used for rendering
+let sX=0, sY=0, sRX=0, sRY=0;
+let scale=1.0, tScale=1.0;
+let charge=0, pinching=false;
+let exploding=false, exT=0, reforming=false;
+let prevFin=-1;
+// velocity of the hand (for inertia on explode)
+let vx=0, vy=0, prevRawX=0, prevRawY=0;
+// hand visibility
+let handVisible=false;
+// pre-cached trig
+let cosX=1,sinX=0,cosY=1,sinY=0;
+
+// ── ring ──────────────────────────────────────────────────────
+function drawRing(v){
+  if(v<=0){RING.style.display='none';return;}
+  RING.style.display='block';
+  rctx.clearRect(0,0,180,180);
+  const cx=90,cy=90,r=68;
+  rctx.strokeStyle='rgba(40,40,70,.5)';
+  rctx.lineWidth=3;
+  rctx.beginPath();rctx.arc(cx,cy,r,0,Math.PI*2);rctx.stroke();
+  rctx.strokeStyle = v>.82 ? `rgba(255,${Math.floor(70*(1-v))},35,.95)` : 'rgba(80,170,255,.88)';
+  rctx.lineWidth=5; rctx.lineCap='round';
+  rctx.beginPath();rctx.arc(cx,cy,r,-Math.PI/2,-Math.PI/2+Math.PI*2*v);rctx.stroke();
+  if(v>.95){
+    rctx.fillStyle='rgba(255,90,20,.1)';
+    rctx.beginPath();rctx.arc(cx,cy,r+16,0,Math.PI*2);rctx.fill();
+  }
+}
+
+// ── explode ───────────────────────────────────────────────────
+function doExplode(){
+  exploding=true; exT=0; reforming=false;
+  // bias explosion velocity in direction hand was moving
+  for(let i=0;i<N;i++){
+    const sp=.07+Math.random()*.2;
+    const th=Math.random()*Math.PI*2;
+    const ph=Math.random()*Math.PI;
+    vel[i*3]   = Math.sin(ph)*Math.cos(th)*sp + vx*.4;
+    vel[i*3+1] = Math.sin(ph)*Math.sin(th)*sp + vy*.4;
+    vel[i*3+2] = Math.cos(ph)*sp*.5;
+  }
+  setSta('✦ boom');
+}
+
+// ── mediapipe results ─────────────────────────────────────────
+function d2(a,b){return Math.hypot(a.x-b.x,a.y-b.y);}
+function fingers(lm){
+  const tips=[8,12,16,20], mids=[6,10,14,18];
+  let c=0;
+  for(let i=0;i<4;i++) if(lm[tips[i]].y<lm[mids[i]].y) c++;
+  if(lm[4].x<lm[3].x) c++;
+  return c;
+}
+
+function onResults(res){
+  OVR.width=innerWidth; OVR.height=innerHeight;
+  octx.clearRect(0,0,OVR.width,OVR.height);
+  const hands=res.multiHandLandmarks;
+
+  if(!hands||!hands.length){
+    pinching=false; handVisible=false;
+    DOT.style.display='none';
+    // decay charge when hand lost
+    charge=Math.max(0,charge-.08);
+    return;
+  }
+
+  handVisible=true;
+
+  if(hands.length===1){
+    const lm=hands[0];
+    const palm=lm[9];
+
+    // --- raw target: direct, no extra damping ---
+    const newX=(0.5-palm.x)*5;
+    const newY=(0.5-palm.y)*3;
+
+    // track hand velocity (for inertia-biased explosion)
+    vx=newX-prevRawX; vy=newY-prevRawY;
+    prevRawX=newX; prevRawY=newY;
+
+    rawX=newX; rawY=newY;
+
+    // rotation from wrist→middle-finger-base axis
+    // multiply by larger factor for more dramatic tilt response
+    rawRY=(lm[5].x-lm[0].x)*10;
+    rawRX=(lm[5].y-lm[0].y)*10;
+
+    // pinch
+    const pd=d2(lm[4],lm[8]);
+    if(pd<.048){
+      pinching=true;
+      charge=Math.min(1,charge+.02);
+      DOT.classList.add('pinch');
+    } else {
+      if(pinching&&charge>.5){doExplode();charge=0;}
+      else charge=Math.max(0,charge-.07);
+      pinching=false;
+      DOT.classList.remove('pinch');
+    }
+
+    // move dot to palm screen position (mirrored)
+    const sx=(1-palm.x)*innerWidth;
+    const sy=palm.y*innerHeight;
+    DOT.style.left=sx+'px'; DOT.style.top=sy+'px';
+    DOT.style.display='block';
+
+    // finger → color
+    const fc=fingers(lm);
+    if(fc!==prevFin){
+      prevFin=fc;
+      const ni=Math.min(fc,PALS.length-1);
+      if(ni!==palI){
+        palI=ni; tCol=[...PALS[palI]];
+        const nm=['blue','green','coral','violet','gold'];
+        setSta(`color → ${nm[palI]}`);
+      }
+    }
+
+    // skeleton overlay (mirrored)
+    octx.save();
+    octx.translate(OVR.width,0); octx.scale(-1,1);
+    octx.globalAlpha=.3;
+    drawConnectors(octx,lm,HAND_CONNECTIONS,{color:'#6688ff',lineWidth:1.5});
+    drawLandmarks(octx,[lm[4],lm[8]],{color:'#ffffff',lineWidth:1,radius:5});
+    octx.restore();
+
+  } else {
+    // two hands → scale
+    pinching=false;
+    charge=Math.max(0,charge-.08);
+    DOT.style.display='none';
+    const p0=hands[0][9], p1=hands[1][9];
+    tScale=Math.max(.3,Math.min(3.0,.4+Math.hypot(p0.x-p1.x,p0.y-p1.y)*3.2));
+
+    octx.save();
+    octx.translate(OVR.width,0); octx.scale(-1,1);
+    octx.globalAlpha=.22;
+    drawConnectors(octx,hands[0],HAND_CONNECTIONS,{color:'#aaffcc',lineWidth:1.5});
+    drawConnectors(octx,hands[1],HAND_CONNECTIONS,{color:'#aaffcc',lineWidth:1.5});
+    octx.restore();
+    setSta(`scale ${tScale.toFixed(2)}`);
+  }
+}
+
+// ── webcam ────────────────────────────────────────────────────
+let camOn=false,mpReady=false,mpCam=null,mpH=null;
+BTN.addEventListener('click',async()=>{
+  if(camOn){
+    if(mpCam)mpCam.stop();
+    VIDEO.style.display='none'; OVR.style.display='none';
+    BTN.textContent='enable webcam'; BTN.classList.remove('on');
+    camOn=false; setSta('webcam off'); DOT.style.display='none'; return;
+  }
+  setSta('requesting camera…'); BTN.textContent='starting…';
+  try{
+    const s=await navigator.mediaDevices.getUserMedia({video:{width:640,height:480,facingMode:'user'}});
+    VIDEO.srcObject=s;
+    await new Promise(r=>{VIDEO.onloadedmetadata=r;});
+    VIDEO.play();
+    VIDEO.style.display='block'; OVR.style.display='block';
+    BTN.textContent='disable webcam'; BTN.classList.add('on'); camOn=true;
+    if(!mpReady){
+      setSta('loading mediapipe…');
+      mpH=new Hands({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`});
+      mpH.setOptions({
+        maxNumHands:2,
+        modelComplexity:1,          // complexity 1 — much better detection
+        minDetectionConfidence:.7,
+        minTrackingConfidence:.6
+      });
+      mpH.onResults(onResults);
+      mpCam=new Camera(VIDEO,{
+        onFrame:async()=>{await mpH.send({image:VIDEO});},
+        width:640, height:480
+      });
+      await mpCam.start();
+      mpReady=true; setSta('✦ ready — show your hand');
+    } else {
+      await mpCam.start(); setSta('✦ ready');
+    }
+  } catch(e){
+    setSta('error: '+e.message);
+    BTN.textContent='enable webcam'; BTN.classList.remove('on');
+  }
+});
+
+// ── render loop ───────────────────────────────────────────────
+let last=performance.now();
+
+function animate(){
+  requestAnimationFrame(animate);
+  const now=performance.now();
+  const dt=Math.min((now-last)/16.67,2.5);
+  last=now;
+
+  // HIGH lerp when hand is visible → instant snap
+  // lower when hand lost → graceful drift back
+  const LP = handVisible
+    ? 1-Math.pow(.004,dt)   // ~0.52/frame @ 60fps — very snappy
+    : 1-Math.pow(.08,dt);   // ~0.14/frame — slow drift when no hand
+
+  sX  += (rawX  - sX)  * LP;
+  sY  += (rawY  - sY)  * LP;
+  sRX += (rawRX - sRX) * LP;
+  sRY += (rawRY - sRY) * LP;
+  scale += (tScale-scale) * (1-Math.pow(.03,dt));
+
+  // color
+  for(let c=0;c<3;c++) cCol[c]+=(tCol[c]-cCol[c])*.035;
+
+  // cache trig once
+  cosX=Math.cos(sRX); sinX=Math.sin(sRX);
+  cosY=Math.cos(sRY); sinY=Math.sin(sRY);
+
+  const t=now*.00014;
+
+  if(exploding){
+    exT+=dt;
+    if(exT>80){exploding=false;reforming=true;}
+    for(let i=0;i<N;i++){
+      pos[i*3]  +=vel[i*3]*dt;
+      pos[i*3+1]+=vel[i*3+1]*dt;
+      pos[i*3+2]+=vel[i*3+2]*dt;
+      vel[i*3+1]-=.0006*dt;
+    }
+  } else if(reforming){
+    let done=true;
+    for(let i=0;i<N;i++){
+      const ox=orig[i*3]*scale+sX;
+      const oy=orig[i*3+1]*scale+sY;
+      const oz=orig[i*3+2]*scale;
+      const dx=ox-pos[i*3], dy=oy-pos[i*3+1], dz=oz-pos[i*3+2];
+      const f=.065*dt;
+      pos[i*3]  +=dx*f;
+      pos[i*3+1]+=dy*f;
+      pos[i*3+2]+=dz*f;
+      if(Math.abs(dx)>.07) done=false;
+    }
+    if(done){reforming=false;setSta('✦ ready');}
+  } else {
+    // particle update — keep lp2 high so particles chase hand tightly
+    const lp2 = .18*dt;
+    const w=.012;
+    for(let i=0;i<N;i++){
+      const ox=orig[i*3], oy=orig[i*3+1], oz=orig[i*3+2];
+      // rotate
+      const ry = cosY*ox+sinY*oz;
+      const rz =-sinY*ox+cosY*oz;
+      const rx2= cosX*ry-sinX*oy;
+      const ry2= sinX*ry+cosX*oy;
+      // subtle idle breathe
+      const wx=Math.sin(t*1.05+i*.002)*w;
+      const wy=Math.cos(t*.9 +i*.003)*w;
+      const tx=rx2*scale+sX+wx;
+      const ty=ry2*scale+sY+wy;
+      const tz=rz *scale+wy*.3;
+      pos[i*3]  +=(tx-pos[i*3]  )*lp2;
+      pos[i*3+1]+=(ty-pos[i*3+1])*lp2;
+      pos[i*3+2]+=(tz-pos[i*3+2])*lp2;
+    }
+  }
+
+  // colors
+  const pulse=.82+.18*Math.sin(now*.0022);
+  for(let i=0;i<N;i++){
+    const t2=i/N;
+    const b=(.48+.52*t2)*pulse;
+    col[i*3]  =cCol[0]*b;
+    col[i*3+1]=cCol[1]*b;
+    col[i*3+2]=cCol[2]*b;
+  }
+
+  geo.attributes.position.needsUpdate=true;
+  geo.attributes.color.needsUpdate=true;
+  drawRing(charge);
+  renderer.render(scene,cam3);
+}
+
+window.addEventListener('resize',()=>{
+  renderer.setSize(innerWidth,innerHeight);
+  cam3.aspect=innerWidth/innerHeight;
+  cam3.updateProjectionMatrix();
+});
+
+animate();
+</script>
+</body>
+</html>
